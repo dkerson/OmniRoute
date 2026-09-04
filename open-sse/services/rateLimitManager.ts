@@ -99,23 +99,18 @@ const PERSIST_DEBOUNCE_MS = 60_000; // Debounce persistence to every 60s max
 let initialized = false;
 
 let currentRequestQueueSettings: RequestQueueSettings = DEFAULT_RESILIENCE_SETTINGS.requestQueue;
+// Historical provider-wide safety net for zai-web (browser-automation
+// provider, slow to dispatch). No zai-web connection is configured today,
+// but this stays as the lowest-priority fallback below any connection-level
+// override (see resolveRequestQueueMaxWaitMs) so re-adding zai-web doesn't
+// silently lose this protection.
 export const ZAI_WEB_REQUEST_QUEUE_MAX_WAIT_MS = 60_000;
 
-// #ffall-fallback: the local rate-limit queue defaults to failing fast (15s,
-// see DEFAULT_REQUEST_QUEUE_MAX_WAIT_MS) so a single stuck cloud provider
-// does not stall a combo. FFALL's own CPU-only Ollama fallback (no GPU)
-// legitimately takes 20-90s to generate a response even for a trivial
-// message - raising the GLOBAL maxWaitMs would slow down failover for every
-// other provider, so this targets only these two known connection ids
-// (same pattern as ZAI_WEB_REQUEST_QUEUE_MAX_WAIT_MS above, scoped by
-// connection id instead of provider name since both connections use the
-// generic "openai" provider id, which future unrelated OpenAI-compatible
-// connections could also use).
-export const FFALL_LOCAL_OLLAMA_CONNECTION_IDS = new Set([
-  "d1dced15-6001-4ed0-ab86-22c2afe16b17", // Ollama VP8/V16 (Llama 3.1 8B) - ffall-fallback
-  "58ad77c3-e065-4c91-b274-f324e0b52112", // Ollama VP8/V16 (Qwen2.5-Coder 7B) - ffall-fallback-code
-]);
-export const FFALL_LOCAL_OLLAMA_REQUEST_QUEUE_MAX_WAIT_MS = 120_000;
+// Upper bound for a connection-level maxWaitMs override (rateLimitOverrides
+// / rate_limit_overrides_json) - defensive clamp so a typo in the operator
+// UI/API can't wedge a connection's queue indefinitely and mask real
+// provider degradation as "still waiting".
+export const MAX_CONNECTION_REQUEST_QUEUE_WAIT_MS = 10 * 60_000; // 10 minutes
 
 const limiterEffectiveSettings = new WeakMap<Bottleneck, Bottleneck.ConstructorOptions>();
 const preservedReplacementSettings = new Map<string, Bottleneck.ConstructorOptions>();
@@ -174,13 +169,22 @@ function resolveMaxConcurrent(override: number | undefined | null): number {
   return typeof override === "number" && override > 0 ? override : EFFECTIVELY_INFINITE_CONCURRENCY;
 }
 
+// #7802-follow-up: was two hardcoded per-target exceptions (zai-web by
+// provider name, FFALL's Ollama fallback by connection id). Generalized
+// into a real per-connection override (rateLimitOverrides.maxWaitMs,
+// validated in src/shared/validation/schemas/provider.ts, hot-reloaded via
+// refreshConnectionRateLimits after a PATCH - see connectionRateLimitOverrides
+// above) so any future slow provider is a config change, not a source edit +
+// redeploy. zai-web's historical default is kept as a provider-wide fallback
+// below the connection override, for the case no explicit override is set.
 export function resolveRequestQueueMaxWaitMs(
   provider: string,
   configuredMaxWaitMs: number = currentRequestQueueSettings.maxWaitMs,
   connectionId?: string
 ): number {
-  if (connectionId && FFALL_LOCAL_OLLAMA_CONNECTION_IDS.has(connectionId)) {
-    return Math.max(configuredMaxWaitMs, FFALL_LOCAL_OLLAMA_REQUEST_QUEUE_MAX_WAIT_MS);
+  const override = connectionId ? connectionRateLimitOverrides.get(connectionId) : undefined;
+  if (override && typeof override.maxWaitMs === "number" && override.maxWaitMs > 0) {
+    return Math.min(override.maxWaitMs, MAX_CONNECTION_REQUEST_QUEUE_WAIT_MS);
   }
   return provider.trim().toLowerCase() === "zai-web"
     ? Math.max(configuredMaxWaitMs, ZAI_WEB_REQUEST_QUEUE_MAX_WAIT_MS)

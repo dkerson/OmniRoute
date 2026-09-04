@@ -477,6 +477,17 @@ export const updateProviderConnectionSchema = z
           tpd: z.coerce.number().int().min(0).max(10_000_000_000).optional(),
           minTime: z.coerce.number().int().min(0).max(60_000).optional(),
           maxConcurrent: z.coerce.number().int().min(0).max(10_000).optional(),
+          // How long a request may wait for a rate-limit queue slot before
+          // failing with a 504, for THIS connection specifically (overrides
+          // the global default, currently 15s - see
+          // DEFAULT_REQUEST_QUEUE_MAX_WAIT_MS / resolveRequestQueueMaxWaitMs
+          // in rateLimitManager.ts). Use for slow local/self-hosted models
+          // (CPU-only inference, browser-automation providers) that
+          // legitimately take longer than the global default without
+          // slowing down failover for every other provider. Capped at 10
+          // minutes (MAX_CONNECTION_REQUEST_QUEUE_WAIT_MS) so a typo can't
+          // wedge a connection's queue indefinitely.
+          maxWaitMs: z.coerce.number().int().min(0).max(600_000).optional(),
         }),
       ])
       .optional(),

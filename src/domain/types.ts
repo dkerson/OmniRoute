@@ -34,6 +34,7 @@
  * @property {number} [rateLimitOverrides.tpd] - Tokens per day limit
  * @property {number} [rateLimitOverrides.minTime] - Minimum ms between requests
  * @property {number} [rateLimitOverrides.maxConcurrent] - Max concurrent requests
+ * @property {number} [rateLimitOverrides.maxWaitMs] - Max ms a request may wait for a rate-limit queue slot before failing with 504 (overrides the global default for this connection)
  * @property {string} createdAt - ISO timestamp
  * @property {string} updatedAt - ISO timestamp
  */

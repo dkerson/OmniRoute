@@ -69,7 +69,7 @@ export function normalizeBooleanColumn(value: unknown, fallback: boolean): boole
 export function sanitizeRateLimitOverrides(value: unknown): Record<string, number> | null {
   if (value === null || value === undefined) return null;
   if (typeof value !== "object" || Array.isArray(value)) return null;
-  const allowedKeys = new Set(["rpm", "tpm", "tpd", "minTime", "maxConcurrent"]);
+  const allowedKeys = new Set(["rpm", "tpm", "tpd", "minTime", "maxConcurrent", "maxWaitMs"]);
   const map: Record<string, number> = {};
   for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
     if (!allowedKeys.has(key)) continue;
