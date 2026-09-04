@@ -59,6 +59,23 @@ RUN set -eux; \
 # ── Builder ────────────────────────────────────────────────────────────────
 FROM base AS builder
 
+# Optional GitHub token to avoid the 60 req/hr unauthenticated rate limit when
+# postinstall scripts (tls-client-node) fetch native binaries from GitHub
+# Releases during npm ci - pass with --build-arg GITHUB_TOKEN=... when the
+# anonymous limit is exhausted. Build-stage only, never lands in the final
+# runner image.
+ARG GITHUB_TOKEN
+ENV GITHUB_TOKEN=${GITHUB_TOKEN}
+
+# tls-client-node's postinstall fetches the native binary from the *latest*
+# bogdanfinn/tls-client GitHub release by default. Release v1.16.0 renamed its
+# asset naming scheme (tls-client-xgo-VERSION-linux-amd64.so instead of the
+# tls-client-linux-ubuntu-amd64-VERSION.so this postinstall script still
+# expects), so "latest" now 404s the download and fails npm ci. Pin to the
+# last version with the old naming (matches what is already running in
+# prod) until tls-client-node ships a fix for the new scheme.
+ENV TLS_CLIENT_VERSION=1.15.1
+
 # Build tools for native module compilation
 # apt-get update needed here because base's rm -rf clears the shared cache
 RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-cache,target=/var/cache/apt,sharing=locked \

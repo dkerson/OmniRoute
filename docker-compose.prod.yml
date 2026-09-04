@@ -55,6 +55,7 @@ services:
         OMNIROUTE_BASE_PATH: ${OMNIROUTE_BASE_PATH:-}
         OMNIROUTE_BUILD_MEMORY_MB: ${OMNIROUTE_BUILD_MEMORY_MB:-10240}
         OMNIROUTE_USE_TURBOPACK: ${OMNIROUTE_USE_TURBOPACK:-0}
+        GITHUB_TOKEN: ${GITHUB_TOKEN:-}
     image: omniroute:prod
     restart: unless-stopped
     stop_grace_period: 40s

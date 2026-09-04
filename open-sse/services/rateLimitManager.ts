@@ -101,6 +101,22 @@ let initialized = false;
 let currentRequestQueueSettings: RequestQueueSettings = DEFAULT_RESILIENCE_SETTINGS.requestQueue;
 export const ZAI_WEB_REQUEST_QUEUE_MAX_WAIT_MS = 60_000;
 
+// #ffall-fallback: the local rate-limit queue defaults to failing fast (15s,
+// see DEFAULT_REQUEST_QUEUE_MAX_WAIT_MS) so a single stuck cloud provider
+// does not stall a combo. FFALL's own CPU-only Ollama fallback (no GPU)
+// legitimately takes 20-90s to generate a response even for a trivial
+// message - raising the GLOBAL maxWaitMs would slow down failover for every
+// other provider, so this targets only these two known connection ids
+// (same pattern as ZAI_WEB_REQUEST_QUEUE_MAX_WAIT_MS above, scoped by
+// connection id instead of provider name since both connections use the
+// generic "openai" provider id, which future unrelated OpenAI-compatible
+// connections could also use).
+export const FFALL_LOCAL_OLLAMA_CONNECTION_IDS = new Set([
+  "d1dced15-6001-4ed0-ab86-22c2afe16b17", // Ollama VP8/V16 (Llama 3.1 8B) - ffall-fallback
+  "58ad77c3-e065-4c91-b274-f324e0b52112", // Ollama VP8/V16 (Qwen2.5-Coder 7B) - ffall-fallback-code
+]);
+export const FFALL_LOCAL_OLLAMA_REQUEST_QUEUE_MAX_WAIT_MS = 120_000;
+
 const limiterEffectiveSettings = new WeakMap<Bottleneck, Bottleneck.ConstructorOptions>();
 const preservedReplacementSettings = new Map<string, Bottleneck.ConstructorOptions>();
 const limiterWatchdog = new LimiterWedgeWatchdog({
@@ -160,8 +176,12 @@ function resolveMaxConcurrent(override: number | undefined | null): number {
 
 export function resolveRequestQueueMaxWaitMs(
   provider: string,
-  configuredMaxWaitMs: number = currentRequestQueueSettings.maxWaitMs
+  configuredMaxWaitMs: number = currentRequestQueueSettings.maxWaitMs,
+  connectionId?: string
 ): number {
+  if (connectionId && FFALL_LOCAL_OLLAMA_CONNECTION_IDS.has(connectionId)) {
+    return Math.max(configuredMaxWaitMs, FFALL_LOCAL_OLLAMA_REQUEST_QUEUE_MAX_WAIT_MS);
+  }
   return provider.trim().toLowerCase() === "zai-web"
     ? Math.max(configuredMaxWaitMs, ZAI_WEB_REQUEST_QUEUE_MAX_WAIT_MS)
     : configuredMaxWaitMs;
@@ -549,7 +569,7 @@ export async function withRateLimit(provider, connectionId, model, fn, signal = 
 
   // Proactive sliding-window fallback for header-less providers with a declared cap
   // (Fase 8.2). No-op unless PROVIDER_DEFAULT_RATE_LIMITS has an entry for `provider`.
-  const maxWaitMs = resolveRequestQueueMaxWaitMs(provider);
+  const maxWaitMs = resolveRequestQueueMaxWaitMs(provider, undefined, connectionId);
   await awaitProviderDefaultSlot(
     provider,
     connectionId,
