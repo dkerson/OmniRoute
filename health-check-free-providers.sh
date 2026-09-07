@@ -2,34 +2,43 @@
 # OmniRoute Free Provider Health Check
 # Runs every 5 min via cron, tests free providers.
 #
-# For felo-web AND opencode specifically (the two no-auth providers in
-# AUTO_COMBO_NOAUTH_ALLOWLIST in open-sse/services/autoCombo/virtualFactory.ts
-# - the only ones actually routed by auto/best-free), this script toggles
-# each provider's OWN provider_connections row's is_active flag. That is the
-# ONLY lever that excludes a specific no-auth provider from auto/* without
-# collateral damage: the auto_candidate_overrides table (per-API-key,
-# connectionId-based) CANNOT do this selectively for no-auth providers,
-# because every no-auth candidate (felo-web AND opencode) shares one
-# synthetic connectionId ("noauth") - excluding by connectionId there would
-# silently take down whichever of the two is still healthy along with the
-# broken one. provider_connections.is_active is checked per-provider
+# For felo-web specifically (one of the two no-auth providers in
+# AUTO_COMBO_NOAUTH_ALLOWLIST in open-sse/services/autoCombo/virtualFactory.ts,
+# alongside opencode), this script toggles its own provider_connections row's
+# is_active flag. That is the ONLY lever that excludes a specific no-auth
+# provider from auto/* without collateral damage: the auto_candidate_overrides
+# table (per-API-key, connectionId-based) CANNOT do this selectively for
+# no-auth providers, because every no-auth candidate (felo-web AND opencode)
+# shares one synthetic connectionId ("noauth") - excluding by connectionId
+# there would silently take down whichever of the two is still healthy along
+# with the broken one. provider_connections.is_active is checked per-provider
 # (disabledNoAuthProviders in virtualFactory.ts, keyed by `provider` column),
 # so a row per provider is precise - no cross-provider damage.
-# Confirmed empirically 2026-09-01 (felo-web): toggling this row takes effect
-# on the very next request with no OmniRoute restart needed (no meaningful
-# connection cache in front of provider_connections reads).
+# Confirmed empirically 2026-09-01: toggling this row takes effect on the very
+# next request with no OmniRoute restart needed (no meaningful connection
+# cache in front of provider_connections reads).
 #
-# #ffall-audit-2026-09-07: opencode's free models (oc/*) were found always
-# failing (400/401) in auto/best-free, wasting ~5-6s per chat trying dead
-# candidates before falling through to the Ollama fallback. Root cause was
-# left alone (upstream OpenCode free-tier restriction, not ours to fix), but
-# the SAME self-healing toggle felo-web already had was missing for
-# opencode, so a known-broken provider stayed in the pool forever with no
-# periodic recheck. toggle_noauth_connection() below is the generic version
-# of what used to be felo-web-only logic, called for both sources now - this
-# also means opencode automatically REJOINS the pool the moment its free
-# tier starts working again (same cron cadence, same is_active flip),
-# instead of requiring a manual DB edit that could be forgotten.
+# #ffall-audit-2026-09-07, tried AND REVERTED same day: generalized the toggle
+# to also cover opencode (toggle_noauth_connection(provider, status), used for
+# both sources) because oc/* free models always fail (400/401) in
+# auto/best-free, wasting ~5-6s per chat before falling through to Ollama.
+# BROKE Sessao de Projeto within ~15min of deploy: opencode is the ONLY
+# candidate in the auto/coding:free pool (tool-calling combo, used by Project
+# Sessions - different from auto/best-free, the plain-chat combo felo-web
+# shares with it). Disabling opencode drops auto/coding:free to 0 candidates,
+# which fails FAST with a clean "capability_mismatch" error instead of the
+# slow-but-eventually-successful internal cascade (coding:free -> best-free ->
+# ffall-fallback/Ollama, ~20s, confirmed working via real traffic logs before
+# this change) that used to recover real tool access for the user. The client
+# then falls to FFALL's OWN client-side BYOK chain (Groq/OpenRouter free
+# tier) instead, which answers fast but WITHOUT reliable tool-calling -
+# strictly worse than the slow-but-working path it replaced. Reverted the
+# opencode toggle call (kept only for felo-web, unaffected - felo-web is not
+# the sole candidate of any tool-calling combo). See
+# vault/wiki/arquitetura-fall-omniroute-analise-2026-09-07.md secao 11.12/11.13
+# before ever re-attempting this - would need the probe itself to send a
+# tool-calling request (not plain chat) and a check that no combo depends on
+# opencode as its only candidate.
 #
 # theoldllm/zcode/auggie/duckduckgo are tested here too (useful signal in the
 # log) but are NOT part of the auto/best-free pool at all (not in the
@@ -168,9 +177,25 @@ for model in "${!FREE_MODELS[@]}"; do
 
   if [ "$source" = "felo" ]; then
     toggle_noauth_connection "felo-web" "$status"
-  elif [ "$source" = "opencode" ]; then
-    toggle_noauth_connection "opencode" "$status"
   fi
+  # #ffall-audit-2026-09-07-revert: NAO chamar toggle_noauth_connection pro
+  # opencode aqui. Diferente do felo-web, opencode e' o UNICO candidato do
+  # combo auto/coding:free (tool-calling, usado pela Sessao de Projeto) - a
+  # sonda deste script usa oc/deepseek-v4-flash-free SEM tools (chat simples),
+  # que sempre falha 400 ("OpenCode's free tier can only be used in OpenCode"),
+  # entao desabilitar por esse sinal zera o pool de auto/coding:free de vez
+  # (poolSize=0, erro imediato "no target supports tool calling"). Confirmado
+  # ao vivo: antes disso, auto/coding:free com opencode como candidato FALHAVA
+  # tambem, mas o OmniRoute cascateava internamente coding:free -> best-free
+  # -> ffall-fallback (Ollama, que tem ferramentas reais) - lento (~20s) mas
+  # funcional. Depois de desabilitar, essa cascata parou de acontecer e o
+  # cliente (FFALL local) caia direto pro fallback BYOK client-side
+  # (Groq/OpenRouter), que responde rapido mas SEM acesso confiavel a
+  # ferramentas do projeto - regressao pior que o problema original.
+  # Reproduzir esse fix com seguranca exigiria testar o probe COM tools (nao
+  # so' chat simples) e confirmar que nenhum outro combo depende de opencode
+  # como unico candidato antes de reativar - nao feito ainda. Ver
+  # vault/wiki/arquitetura-fall-omniroute-analise-2026-09-07.md secao 11.12.
 
   case "$status" in
     healthy)
