@@ -23,7 +23,7 @@ export interface CompressionRunTelemetrySummary {
   appliedStyleCounts: Record<string, number>;
 }
 
-function ensureCompressionRunTelemetryTable(): void {
+export function ensureCompressionRunTelemetryTable(): void {
   const db = getDbInstance();
   // `CREATE TABLE IF NOT EXISTS` is idempotent and cheap; run it unconditionally so the
   // table self-heals if it was dropped (e.g. test isolation) under the same db handle.

@@ -5,6 +5,7 @@
  */
 
 import { getDbInstance } from "./core";
+import { ensureCompressionRunTelemetryTable } from "./compressionRunTelemetry";
 import { getUserDatabaseSettings } from "./databaseSettings";
 import { rollupUsageHistoryBeforeDate } from "@/lib/usage/aggregateHistory";
 import { purgeCallLogArtifactDirectory } from "@/lib/usage/callLogArtifacts";
@@ -350,6 +351,13 @@ export async function cleanupXpAuditLog(): Promise<CleanupResult> {
  */
 export async function cleanupCompressionRunTelemetry(): Promise<CleanupResult> {
   const db = getDbInstance();
+  // #ffall-audit-2026-09: a tabela so' era criada (lazy, CREATE TABLE IF NOT
+  // EXISTS) no caminho de ESCRITA (insertCompressionRunTelemetryRow), nunca
+  // aqui - numa instancia sem nenhum compression run gravado ainda, o DELETE
+  // abaixo falhava com "no such table: compression_run_telemetry" a cada
+  // ciclo de limpeza (5min), sempre capturado pelo catch mas nunca resolvido.
+  // Idempotente e barato, seguro rodar sempre.
+  ensureCompressionRunTelemetryTable();
   const retention = getRetentionSettings();
 
   const retentionDays = retention.compressionRunTelemetry;
