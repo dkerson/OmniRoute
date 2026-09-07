@@ -75,7 +75,7 @@ services:
       - CHATGPT_WEB_CODEX_CDP_URL=http://chatgpt-web-codex-browser:9223
     ports:
       - "${PROD_DASHBOARD_PORT:-20130}:${DASHBOARD_PORT:-${PORT:-20128}}"
-      - "${PROD_API_PORT:-20131}:${API_PORT:-20129}"
+      - "10.10.0.1:${PROD_API_PORT:-20131}:${API_PORT:-20129}"
       - "${PROD_LIVE_WS_PORT:-20132}:${LIVE_WS_PORT:-20132}"
     volumes:
       - omniroute-prod-data:/app/data

@@ -2032,7 +2032,21 @@ export async function handleChatCore({
   // wants JSON; the non-streaming branch below accumulates the SSE and converts
   // it back to JSON (same mechanism already used for Claude-Code-compatible
   // providers via isClaudeCodeCompatible).
-  const upstreamStream = stream || isClaudeCodeCompatible || providerRequiresStreaming;
+  // #FFALL-9034: connection-level override for upstreams whose streaming
+  // implementation emits occasional malformed SSE chunks (confirmed: our
+  // Ollama-backed connections via openai-compatible-chat). Forces a plain
+  // non-streaming upstream request for THIS connection only, regardless of
+  // provider/client preference. The existing #3089 maybeConvertJsonBodyToSse
+  // (below, in the streaming-response branch) already synthesizes a valid
+  // SSE stream from a JSON body for any client that requested stream:true -
+  // no new conversion logic needed, this only changes what we ask upstream.
+  const connectionForcesNonStreamingUpstream =
+    credentials?.providerSpecificData &&
+    typeof credentials.providerSpecificData === "object" &&
+    (credentials.providerSpecificData as Record<string, unknown>).forceNonStreamUpstream === true;
+  const upstreamStream =
+    !connectionForcesNonStreamingUpstream &&
+    (stream || isClaudeCodeCompatible || providerRequiresStreaming);
   let ccSessionId: string | null = null;
   const stripTypes = getStripTypesForProviderModel(provider || "", model || "");
 

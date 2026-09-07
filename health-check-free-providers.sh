@@ -25,7 +25,15 @@
 set -euo pipefail
 
 OMNIROUTE_API="http://localhost:20131/v1/chat/completions"
-OMNIROUTE_TOKEN="11235726ab739804eb108c27c41b76585491e50c12f0d0f6d70fc369dcf068e2"
+# #ffall-audit-2026-09: token estava hardcoded aqui em texto plano, num script
+# world-readable (-rwxr-xr-x) rodando via cron a cada 5min. Le do .env real
+# agora (que ja tinha o mesmo valor sob OMNIROUTE_API_KEY, tambem corrigido
+# pra chmod 600 nesta mesma auditoria) em vez de duplicar o secret aqui.
+OMNIROUTE_TOKEN="$(grep -E '^OMNIROUTE_API_KEY=' /opt/omniroute/.env | cut -d= -f2-)"
+if [ -z "$OMNIROUTE_TOKEN" ]; then
+  echo "FATAL: OMNIROUTE_API_KEY nao encontrado em /opt/omniroute/.env" >&2
+  exit 1
+fi
 SQLITE_DB="/var/lib/docker/volumes/omniroute-prod-data/_data/storage.sqlite"
 LOG_FILE="/var/log/omniroute-health-check.log"
 
