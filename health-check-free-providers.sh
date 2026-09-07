@@ -2,20 +2,34 @@
 # OmniRoute Free Provider Health Check
 # Runs every 5 min via cron, tests free providers.
 #
-# For felo-web specifically (the only no-auth provider besides opencode that
-# is allowlisted into the auto/* candidate pool - see AUTO_COMBO_NOAUTH_ALLOWLIST
-# in open-sse/services/autoCombo/virtualFactory.ts), this script also toggles
-# its own provider_connections row's is_active flag. That is the ONLY lever
-# that excludes a specific no-auth provider from auto/* without collateral
-# damage: the auto_candidate_overrides table (per-API-key, connectionId-based)
-# CANNOT do this selectively for no-auth providers, because every no-auth
-# candidate (felo-web AND opencode) shares one synthetic connectionId
-# ("noauth") - excluding by connectionId there would silently kill opencode's
-# free models too. provider_connections.is_active is checked per-provider
-# (disabledNoAuthProviders in virtualFactory.ts), so it is precise.
-# Confirmed empirically 2026-09-01: toggling this row takes effect on the very
-# next request with no OmniRoute restart needed (no meaningful connection cache
-# in front of provider_connections reads).
+# For felo-web AND opencode specifically (the two no-auth providers in
+# AUTO_COMBO_NOAUTH_ALLOWLIST in open-sse/services/autoCombo/virtualFactory.ts
+# - the only ones actually routed by auto/best-free), this script toggles
+# each provider's OWN provider_connections row's is_active flag. That is the
+# ONLY lever that excludes a specific no-auth provider from auto/* without
+# collateral damage: the auto_candidate_overrides table (per-API-key,
+# connectionId-based) CANNOT do this selectively for no-auth providers,
+# because every no-auth candidate (felo-web AND opencode) shares one
+# synthetic connectionId ("noauth") - excluding by connectionId there would
+# silently take down whichever of the two is still healthy along with the
+# broken one. provider_connections.is_active is checked per-provider
+# (disabledNoAuthProviders in virtualFactory.ts, keyed by `provider` column),
+# so a row per provider is precise - no cross-provider damage.
+# Confirmed empirically 2026-09-01 (felo-web): toggling this row takes effect
+# on the very next request with no OmniRoute restart needed (no meaningful
+# connection cache in front of provider_connections reads).
+#
+# #ffall-audit-2026-09-07: opencode's free models (oc/*) were found always
+# failing (400/401) in auto/best-free, wasting ~5-6s per chat trying dead
+# candidates before falling through to the Ollama fallback. Root cause was
+# left alone (upstream OpenCode free-tier restriction, not ours to fix), but
+# the SAME self-healing toggle felo-web already had was missing for
+# opencode, so a known-broken provider stayed in the pool forever with no
+# periodic recheck. toggle_noauth_connection() below is the generic version
+# of what used to be felo-web-only logic, called for both sources now - this
+# also means opencode automatically REJOINS the pool the moment its free
+# tier starts working again (same cron cadence, same is_active flip),
+# instead of requiring a manual DB edit that could be forgotten.
 #
 # theoldllm/zcode/auggie/duckduckgo are tested here too (useful signal in the
 # log) but are NOT part of the auto/best-free pool at all (not in the
@@ -24,7 +38,18 @@
 
 set -euo pipefail
 
-OMNIROUTE_API="http://localhost:20131/v1/chat/completions"
+# #ffall-audit-2026-09-07: era "http://localhost:20131" - quebrou silenciosamente
+# quando docker-compose.prod.yml passou a publicar a porta 20131 so' em
+# 10.10.0.1 (WireGuard), nao mais em 0.0.0.0/127.0.0.1 (fix de seguranca desta
+# mesma auditoria, commit 1c1e4fb87). Resultado: TODO run do cron (5/5min)
+# desde a recriacao do container reportou "failed" pra TODOS os providers
+# (incluindo Ollama), mesmo com trafego real funcionando normalmente via
+# 10.10.0.1 - confirmado comparando curl direto (localhost=exit7/connection
+# refused, 10.10.0.1=HTTP 401 sem auth, ou seja alcancavel) com os logs reais
+# do container (requests de producao concluindo com sucesso no mesmo periodo).
+# O proprio health-check roda NO host VP6 (nao dentro do container docker),
+# entao precisa do IP WireGuard como qualquer outro cliente externo.
+OMNIROUTE_API="http://10.10.0.1:20131/v1/chat/completions"
 # #ffall-audit-2026-09: token estava hardcoded aqui em texto plano, num script
 # world-readable (-rwxr-xr-x) rodando via cron a cada 5min. Le do .env real
 # agora (que ja tinha o mesmo valor sob OMNIROUTE_API_KEY, tambem corrigido
@@ -84,15 +109,20 @@ test_model() {
   fi
 }
 
-# Toggle felo-web's own provider_connections.is_active based on the latest
-# felo/felo-chat probe result. Idempotent - safe to run every 5 min forever.
-toggle_felo_web_connection() {
-  local status="$1"
+# Toggle a no-auth provider's own provider_connections.is_active based on
+# its latest probe result. Idempotent - safe to run every 5 min forever.
+# Used for felo-web and opencode (the two providers in
+# AUTO_COMBO_NOAUTH_ALLOWLIST) - each gets its OWN row keyed by `provider`,
+# so disabling one never touches the other even though both share the same
+# synthetic noauth connectionId at request time.
+toggle_noauth_connection() {
+  local provider="$1"
+  local status="$2"
   local now
   now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
   local existing_id
-  existing_id=$(sqlite3 "$SQLITE_DB" "SELECT id FROM provider_connections WHERE provider='felo-web' ORDER BY created_at DESC LIMIT 1;" 2>/dev/null || echo "")
+  existing_id=$(sqlite3 "$SQLITE_DB" "SELECT id FROM provider_connections WHERE provider='${provider}' ORDER BY created_at DESC LIMIT 1;" 2>/dev/null || echo "")
 
   if [ "$status" = "healthy" ]; then
     if [ -n "$existing_id" ]; then
@@ -100,7 +130,7 @@ toggle_felo_web_connection() {
       is_active=$(sqlite3 "$SQLITE_DB" "SELECT is_active FROM provider_connections WHERE id='${existing_id}';" 2>/dev/null || echo "1")
       if [ "$is_active" = "0" ]; then
         sqlite3 "$SQLITE_DB" "UPDATE provider_connections SET is_active=1, updated_at='${now}', test_status='healthy', last_error=NULL WHERE id='${existing_id}';"
-        log "felo-web RE-ENABLED in auto/* pool (health check passed)"
+        log "${provider} RE-ENABLED in auto/* pool (health check passed)"
       fi
     fi
     return
@@ -110,14 +140,14 @@ toggle_felo_web_connection() {
   if [ -z "$existing_id" ]; then
     local new_id
     new_id=$(cat /proc/sys/kernel/random/uuid)
-    sqlite3 "$SQLITE_DB" "INSERT INTO provider_connections (id, provider, auth_type, display_name, is_active, created_at, updated_at, test_status, last_error) VALUES ('${new_id}', 'felo-web', 'noauth-toggle', 'felo-web (auto-managed by health-check)', 0, '${now}', '${now}', '${status}', 'Auto-disabled by health-check: ${status}');"
-    log "felo-web DISABLED in auto/* pool (health check: ${status})"
+    sqlite3 "$SQLITE_DB" "INSERT INTO provider_connections (id, provider, auth_type, display_name, is_active, created_at, updated_at, test_status, last_error) VALUES ('${new_id}', '${provider}', 'noauth-toggle', '${provider} (auto-managed by health-check)', 0, '${now}', '${now}', '${status}', 'Auto-disabled by health-check: ${status}');"
+    log "${provider} DISABLED in auto/* pool (health check: ${status})"
   else
     local is_active
     is_active=$(sqlite3 "$SQLITE_DB" "SELECT is_active FROM provider_connections WHERE id='${existing_id}';" 2>/dev/null || echo "1")
     if [ "$is_active" = "1" ]; then
       sqlite3 "$SQLITE_DB" "UPDATE provider_connections SET is_active=0, updated_at='${now}', test_status='${status}', last_error='Auto-disabled by health-check: ${status}' WHERE id='${existing_id}';"
-      log "felo-web DISABLED in auto/* pool (health check: ${status})"
+      log "${provider} DISABLED in auto/* pool (health check: ${status})"
     else
       sqlite3 "$SQLITE_DB" "UPDATE provider_connections SET updated_at='${now}', test_status='${status}' WHERE id='${existing_id}';"
     fi
@@ -137,7 +167,9 @@ for model in "${!FREE_MODELS[@]}"; do
   log "Model: $model (source: $source) -> Status: $status"
 
   if [ "$source" = "felo" ]; then
-    toggle_felo_web_connection "$status"
+    toggle_noauth_connection "felo-web" "$status"
+  elif [ "$source" = "opencode" ]; then
+    toggle_noauth_connection "opencode" "$status"
   fi
 
   case "$status" in
